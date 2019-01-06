@@ -7,6 +7,7 @@
 #include <assert.h>
 
 #define BITS(X) (sizeof(X) * 8)
+#define END_OF_BLOCK 0xffff
 
 typedef struct huff_sym_table_ent {
 	uint8_t symbol;
@@ -20,7 +21,7 @@ typedef struct huff_symbol_table {
 
 typedef struct huff_node huff_node_t;
 typedef struct huff_node {
-	uint8_t symbol;
+	uint16_t symbol;
 	unsigned weight;
 
 	huff_node_t *left;
@@ -166,10 +167,10 @@ void *queue_pop_min(queue_t *a, queue_t *b, queue_compare comp) {
 	return queue_pop_front((diff <= 0)? a : b);
 }
 
-huff_node_t *make_huffnode(uint8_t symbol,
-						   huff_node_t *left,
-						   huff_node_t *right,
-						   uint16_t weight)
+huff_node_t *make_huffnode(uint16_t symbol,
+                           huff_node_t *left,
+                           huff_node_t *right,
+                           uint16_t weight)
 {
 	huff_node_t *ret = calloc(1, sizeof(huff_node_t));
 
@@ -237,6 +238,10 @@ huff_tree_t *open_symfile(const char *symfile) {
 	queue_t *input = queue_create();
 	queue_t *output = queue_create();
 
+	// add a non-data node that signals the end of input
+	huff_node_t *node = make_huffnode(END_OF_BLOCK, NULL, NULL, 0);
+	queue_push_back(input, node);
+
 	for (unsigned k = 0; k < sym_table->length; k++) {
 		huff_node_t *node = make_huffnode(sym_table->symbols[k].symbol,
 		                                  NULL, NULL,
@@ -294,7 +299,7 @@ bool is_leaf(huff_node_t *node) {
 
 bool huff_do_encode(huff_node_t *node,
                     huff_stream_t *stream,
-                    uint8_t symbol,
+                    uint16_t symbol,
                     uint32_t path,
                     uint32_t pathbits)
 {
@@ -319,9 +324,9 @@ bool huff_do_encode(huff_node_t *node,
 	return left || right;
 }
 
-void huff_do_decode(huff_node_t *node, huff_stream_t *stream) {
+bool huff_do_decode(huff_node_t *node, huff_stream_t *stream) {
 	if (!node) {
-		return;
+		return true;
 	}
 
 	for (bool found = false; !found;) {
@@ -330,10 +335,15 @@ void huff_do_decode(huff_node_t *node, huff_stream_t *stream) {
 		node = dir? node->right : node->left;
 
 		if (is_leaf(node)) {
+			if (node->symbol == END_OF_BLOCK)
+				return true;
+
 			putchar(node->symbol);
 			found = true;
 		}
 	}
+
+	return false;
 }
 
 void huff_encode(huff_tree_t *tree, FILE *fp) {
@@ -342,22 +352,29 @@ void huff_encode(huff_tree_t *tree, FILE *fp) {
 	stream.fp = stdout;
 
 	while (!feof(fp)) {
-		uint8_t sym = fgetc(fp);
-		if (feof(fp)) break;
+		uint16_t sym = fgetc(fp) & 0xff;
+		if (feof(fp)) {
+			break;
+		}
 
 		if (!huff_do_encode(tree->nodes, &stream, sym, 0, 0)) {
 			fprintf(stderr, "error: can't encode %02x, no symbol!\n", sym);
 		}
 	}
+
+	// XXX: why do we need two?
+	huff_do_encode(tree->nodes, &stream, END_OF_BLOCK, 0, 0);
+	huff_do_encode(tree->nodes, &stream, END_OF_BLOCK, 0, 0);
 }
 
 void huff_decode(huff_tree_t *tree, FILE *fp) {
 	huff_stream_t stream;
 	memset(&stream, 0, sizeof(stream));
 	stream.fp = stdin;
+	bool block_end = false;
 
-	while (!feof(stream.fp)) {
-		huff_do_decode(tree->nodes, &stream);
+	while (!block_end && !feof(stream.fp)) {
+		block_end = huff_do_decode(tree->nodes, &stream);
 	}
 }
 
