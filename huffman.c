@@ -6,18 +6,10 @@
 
 #include <assert.h>
 
+#include <hz/gentable.h>
+
 #define BITS(X) (sizeof(X) * 8)
 #define END_OF_BLOCK 0xffff
-
-typedef struct huff_sym_table_ent {
-	uint8_t symbol;
-	uint8_t weight;
-} huff_sym_table_ent_t;
-
-typedef struct huff_symbol_table {
-	huff_sym_table_ent_t *symbols;
-	size_t length;
-} huff_symbol_table_t;
 
 typedef struct huff_node huff_node_t;
 typedef struct huff_node {
@@ -31,8 +23,8 @@ typedef struct huff_node {
 
 typedef struct huff_tree {
 	//huff_table_sym_t *symbols;
-	huff_symbol_table_t *symbols;
-	huff_node_t *nodes;
+	const huff_symbol_table_t *symbols;
+	/* TODO: const */ huff_node_t *nodes;
 } huff_tree_t;
 
 typedef struct huff_stream {
@@ -203,6 +195,7 @@ void dump_hufftree(huff_node_t *node, unsigned indent) {
 	}
 }
 
+/*
 huff_symbol_table_t *load_symbol_file(const char *symfile) {
 	huff_symbol_table_t *ret = NULL;
 
@@ -226,10 +219,11 @@ huff_symbol_table_t *load_symbol_file(const char *symfile) {
 
 	return ret;
 }
+*/
 
-huff_tree_t *open_symfile(const char *symfile) {
-	huff_node_t *ret = NULL;
-	huff_symbol_table_t *sym_table = load_symbol_file(symfile);
+//huff_tree_t *open_symfile(const char *symfile) {
+huff_tree_t *huff_tree_create(const huff_symbol_table_t *sym_table) {
+	//huff_symbol_table_t *sym_table = load_symbol_file(symfile);
 
 	if (!sym_table) {
 		fprintf(stderr, "couldn't load symbols!\n");
@@ -378,10 +372,24 @@ void huff_decode(huff_tree_t *tree, FILE *fp) {
 	}
 }
 
+void write_signature(FILE *fp) {
+	fprintf(fp, "hzpk");
+}
+
+bool check_signature(FILE *fp) {
+	char sig[5];
+	fgets(sig, 5, fp);
+
+	return strcmp(sig, "hzpk") == 0;
+}
+
 int main(int argc, char *argv[]) {
+	/*
 	const char *symfile = "symbols.bin";
 	huff_tree_t *hufftree = open_symfile(symfile);
+	*/
 
+	/*
 	if (argc >= 2 && strcmp(argv[1], "-D") == 0) {
 		dump_hufftree(hufftree->nodes, 0);
 
@@ -390,10 +398,25 @@ int main(int argc, char *argv[]) {
 		}
 		putchar('\n');
 
-	} else if (argc >= 2 && strcmp(argv[1], "-e") == 0) {
-		huff_encode(hufftree, stdin);
+	} else */
+	if (argc >= 3 && strcmp(argv[1], "-e") == 0) {
+		FILE *fp = fopen(argv[2], "r");
+		assert(fp != NULL); // TODO: proper errors and stuff
+
+		write_signature(stdout);
+		huff_symbol_table_t *symtab = generate_symtab(fp);
+
+		assert(symtab != NULL);
+		write_packed_symtab(stdout, symtab);
+
+		huff_tree_t *hufftree = huff_tree_create(symtab);
+		huff_encode(hufftree, fp);
 
 	} else if (argc >= 2 && strcmp(argv[1], "-d") == 0) {
+		assert(check_signature(stdin));
+		huff_symbol_table_t *symtab = read_packed_symtab(stdin);
+		huff_tree_t *hufftree = huff_tree_create(symtab);
+
 		huff_decode(hufftree, stdin);
 
 	} else {

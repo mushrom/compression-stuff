@@ -1,10 +1,10 @@
-CFLAGS = -O2 -Wall -g
+CFLAGS = -O2 -Wall -g -I./include
 
-all: gentable huffman rle
+all: huffman rle
 
 gentable: gentable.o
 
-huffman: huffman.o
+huffman: huffman.o gentable.o
 
 rle: rle.o
 

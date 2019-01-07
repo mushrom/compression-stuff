@@ -4,19 +4,15 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include <hz/gentable.h>
+
 typedef struct {
 	uint8_t  symbol;
 	uint64_t frequency;
 } huff_symbol_t;
 
-uint64_t count_file(const char *name, unsigned symbits, huff_symbol_t *symtab) {
+uint64_t count_file(FILE *fp, unsigned symbits, huff_symbol_t *symtab) {
 	uint64_t ret = 0;
-	FILE *fp = fopen(name, "r");
-
-	if (!fp) {
-		fprintf(stderr, "couldn't open \"%s\"\n", name);
-		return ret;
-	}
 
 	while (!feof(fp)) {
 		// TODO: bits and stuff
@@ -28,7 +24,7 @@ uint64_t count_file(const char *name, unsigned symbits, huff_symbol_t *symtab) {
 		symtab[c].symbol = c;
 	}
 
-	fclose(fp);
+	rewind(fp);
 	return ret;
 }
 
@@ -36,7 +32,7 @@ uint64_t symbol_max_freq(huff_symbol_t *symtab, unsigned num_symbols) {
 	uint64_t ret = 0;
 
 	for (unsigned i = 0; i < num_symbols; i++) {
-		if (symtab[i].symbol) {
+		if (symtab[i].frequency) {
 			ret = (symtab[i].frequency > ret)? symtab[i].frequency : ret;
 		}
 	}
@@ -48,11 +44,11 @@ uint8_t symbol_weight(uint64_t max_freq, huff_symbol_t *symbol) {
 	return (uint8_t)(0xff * (symbol->frequency / (max_freq * 1.0)));
 }
 
-void debug_symtab(unsigned symbits, huff_symbol_t *symtab, uint64_t symsum) {
+void debug_symtab(huff_symbol_t *symtab, unsigned symbits, uint64_t symsum) {
 	uint64_t max_freq = symbol_max_freq(symtab, symbits);
 
 	for (unsigned i = 0; i < symbits; i++) {
-		if (symtab[i].symbol) {
+		if (symtab[i].frequency) {
 			printf("%02x : %lu (%u)\n",
 				   symtab[i].symbol,
 				   symtab[i].frequency,
@@ -61,17 +57,65 @@ void debug_symtab(unsigned symbits, huff_symbol_t *symtab, uint64_t symsum) {
 	}
 }
 
-void print_symtab(unsigned symbits, huff_symbol_t *symtab, uint64_t symsum) {
+void print_symtab(huff_symbol_t *symtab, unsigned symbits, int64_t symsum) {
 	uint64_t max_freq = symbol_max_freq(symtab, symbits);
 
 	for (unsigned i = 0; i < symbits; i++) {
 		if (symtab[i].frequency) {
 			uint8_t weight = symbol_weight(max_freq, symtab + i);
 
-			fwrite(&symtab[i].symbol, sizeof(symtab[i].symbol), 1, stdout);
-			fwrite(&weight, sizeof(weight), 1, stdout);
+			fwrite(&symtab[i].symbol, 1, 1, stdout);
+			fwrite(&weight, 1, 1, stdout);
 		}
 	}
+}
+
+unsigned pack_symtab(huff_symbol_table_t *outtab,
+                     huff_symbol_t *symtab,
+                     unsigned symbits,
+                     uint64_t symsum)
+{
+	uint64_t max_freq = symbol_max_freq(symtab, symbits);
+	unsigned ret = 0;
+
+	for (unsigned i = 0; i < symbits; i++) {
+		if (symtab[i].frequency) {
+			uint8_t weight = symbol_weight(max_freq, symtab + i);
+
+			outtab->symbols[ret].symbol = symtab[i].symbol;
+			outtab->symbols[ret].weight = weight;
+			ret += 1;
+		}
+	}
+
+	return ret;
+}
+
+void write_packed_symtab(FILE *fp, huff_symbol_table_t *table) {
+	fwrite(&table->length, 1, 2, fp);
+
+	for (unsigned i = 0; i < table->length; i++) {
+		fwrite(&table->symbols[i].symbol, 1, 1, fp);
+		fwrite(&table->symbols[i].weight, 1, 1, fp);
+	}
+}
+
+huff_symbol_table_t *read_packed_symtab(FILE *fp) {
+	// TODO: leaving this here in case symbol size is ever configurable
+	//       (will it ever be? seems kinda silly tbh)
+	unsigned symbols = 256;
+
+	huff_symbol_table_t *ret = calloc(1, sizeof(huff_symbol_table_t));
+	ret->symbols = calloc(1, sizeof(huff_sym_table_ent_t[symbols]));
+
+	fread(&ret->length, 1, 2, fp);
+
+	for (unsigned i = 0; i < ret->length; i++) {
+		fread(&ret->symbols[i].symbol, 1, 1, fp);
+		fread(&ret->symbols[i].weight, 1, 1, fp);
+	}
+
+	return ret;
 }
 
 int huff_frequency_compare(const void *a, const void *b) {
@@ -81,53 +125,18 @@ int huff_frequency_compare(const void *a, const void *b) {
 	return (int32_t)x->frequency - (int32_t)y->frequency;
 }
 
-int main(int argc, char *argv[]) {
+huff_symbol_table_t *generate_symtab(FILE *input){
 	unsigned symbols = 256;
-	const char *output = "/dev/stdout";
-	bool debug_output = false;
 
-	int i = 1;
-
-	for (; i < argc; i++) {
-		if (argv[i][0] == '-') {
-			switch (argv[i][1]) {
-				case 's':
-					symbols = atoi(argv[++i]);
-					break;
-
-				case 'd':
-					debug_output = true;
-					break;
-
-				default:
-					break;
-			}
-		}
-
-		else break;
-	}
-
-	uint64_t symsum = 0;
+	huff_symbol_table_t *ret = calloc(1, sizeof(huff_symbol_table_t));
 	huff_symbol_t symtab[symbols];
 	memset(symtab, 0, sizeof(symtab));
 
-	if (i == argc) {
-		symsum += count_file("/dev/stdin", symbols, symtab);
-
-	} else {
-		for (; i < argc; i++) {
-			symsum += count_file(argv[i], symbols, symtab);
-		}
-	}
-
+	uint64_t symsum = count_file(input, symbols, symtab);
 	qsort(symtab, symbols, sizeof(huff_symbol_t), huff_frequency_compare);
 
-	if (debug_output) {
-		debug_symtab(symbols, symtab, symsum);
+	ret->symbols = calloc(1, sizeof(huff_sym_table_ent_t[symbols]));
+	ret->length  = pack_symtab(ret, symtab, symbols, symsum);
 
-	} else {
-		print_symtab(symbols, symtab, symsum);
-	}
-
-	return 0;
+	return ret;
 }
