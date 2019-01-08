@@ -1,4 +1,5 @@
 #!/bin/sh
 
-cat "$1" | ./rle -e | ./gentable > symbols.bin
-cat "$1" | ./rle -e | ./huffman -e
+temp=`mktemp`
+./rle -e > $temp && ./huffman -e $temp
+rm $temp

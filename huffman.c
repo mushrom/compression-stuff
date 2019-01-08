@@ -7,8 +7,8 @@
 #include <assert.h>
 
 #include <hz/gentable.h>
+#include <hz/bitstream.h>
 
-#define BITS(X) (sizeof(X) * 8)
 #define END_OF_BLOCK 0xffff
 
 typedef struct huff_node huff_node_t;
@@ -26,12 +26,6 @@ typedef struct huff_tree {
 	const huff_symbol_table_t *symbols;
 	/* TODO: const */ huff_node_t *nodes;
 } huff_tree_t;
-
-typedef struct huff_stream {
-	FILE *fp;
-	uint8_t buffer;
-	unsigned index;
-} huff_stream_t;
 
 typedef struct queue_node queue_node_t;
 typedef struct queue_node {
@@ -260,27 +254,6 @@ huff_tree_t *huff_tree_create(const huff_symbol_table_t *sym_table) {
 	blarg->nodes = queue_pop_min(input, output, huff_node_compare);
 
 	return blarg;
-}
-
-bool huff_stream_write(huff_stream_t *stream, bool bit) {
-	stream->buffer |= bit << stream->index++;
-
-	if (stream->index == BITS(stream->buffer)) {
-		fwrite(&stream->buffer, 1, sizeof(stream->buffer), stream->fp);
-		stream->index  = 0;
-		stream->buffer = 0;
-	}
-
-	return true;
-}
-
-bool huff_stream_read(huff_stream_t *stream) {
-	if (stream->index == 0) {
-		fread(&stream->buffer, 1, sizeof(stream->buffer), stream->fp);
-		stream->index = BITS(stream->buffer);
-	}
-
-	return !!(stream->buffer & (1 << (BITS(stream->buffer) - stream->index--)));
 }
 
 bool is_internal(huff_node_t *node) {
