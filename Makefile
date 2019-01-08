@@ -12,4 +12,4 @@ rle: rle.o
 
 .PHONY: clean
 clean:
-	rm -f gentable{,.o} huffman{,.o} rle{,.o} lzs{,o}
+	rm -f gentable{,.o} huffman{,.o} rle{,.o} lzs{,.o}

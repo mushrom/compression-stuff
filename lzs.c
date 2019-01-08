@@ -94,7 +94,17 @@ typedef struct prefix_pair {
 	uint16_t index;
 	uint16_t length;
 	bool found;
+	bool end_marker;
 } prefix_pair_t;
+
+prefix_pair_t make_end_marker(void) {
+	return (prefix_pair_t) {
+		.index = 0,
+		.length = 0,
+		.found = true,
+		.end_marker = true,
+	};
+}
 
 // TODO: more efficient string matching
 prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
@@ -102,6 +112,7 @@ prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
 		.index = 0,
 		.length = 0,
 		.found = false,
+		.end_marker = false,
 	};
 
 	for (uint16_t k = 0; k < window_available(window); k++) {
@@ -119,9 +130,11 @@ prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
 			}
 		}
 
+		uint16_t distance = window_available(window) - k;
+
 		if (temp_len > ret.length) {
 			ret.found = true;
-			ret.index = k;
+			ret.index = distance;
 			ret.length = temp_len;
 		}
 	}
@@ -130,7 +143,7 @@ prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
 }
 
 void write_prefix(prefix_pair_t *prefix, huff_stream_t *out) {
-	huff_stream_write(out, 0);
+	huff_stream_write(out, 1);
 
 	if (prefix->index < 128) {
 		huff_stream_write(out, 1);
@@ -152,6 +165,8 @@ void write_prefix(prefix_pair_t *prefix, huff_stream_t *out) {
 	} else {
 		// TODO: would it be more efficient to have a variable-length field
 		//       like the index?
+		//
+		// NOTE: ok so probably not but definitely something to think about
 		unsigned foo = (prefix->length + 7) / 15;
 		unsigned bar = prefix->length - ((foo * 15) - 7);
 
@@ -164,7 +179,7 @@ void write_prefix(prefix_pair_t *prefix, huff_stream_t *out) {
 }
 
 void write_literal(uint8_t literal, huff_stream_t *out) {
-	huff_stream_write(out, 1);
+	huff_stream_write(out, 0);
 	huff_stream_write_bits(out, 8, literal);
 }
 
@@ -174,10 +189,12 @@ prefix_pair_t read_prefix(huff_stream_t *in) {
 		.length = 0,
 		.index = 0,
 		.found = true,
+		.end_marker = false,
 	};
 
 	bool is_small_offset = huff_stream_read(in);
 	ret.index = huff_stream_read_bits(in, is_small_offset? 7 : 11);
+	ret.end_marker = ret.index == 0;
 
 	unsigned lenbits = huff_stream_read_bits(in, 2);
 
@@ -227,7 +244,7 @@ void encode(FILE *fp) {
 	while (refill_input(input, fp)) {
 		prefix_pair_t prefix = find_prefix(input, window);
 
-		if (prefix.found && prefix.length > 2) {
+		if (prefix.found && prefix.length > 1) {
 			write_prefix(&prefix, &out);
 
 			for (unsigned k = 0; k < prefix.length; k++) {
@@ -240,6 +257,8 @@ void encode(FILE *fp) {
 		}
 	}
 
+	prefix_pair_t end = make_end_marker();
+	write_prefix(&end, &out);
 	huff_stream_flush(&out);
 	fclose(out.fp);
 }
@@ -252,7 +271,7 @@ void decode(FILE *fp) {
 	lzs_window_t *window = window_create(0);
 
 	while (!feof(in.fp)) {
-		bool is_literal = huff_stream_read(&in);
+		bool is_literal = !huff_stream_read(&in);
 
 		if (is_literal) {
 			uint8_t value = read_literal(&in);
@@ -261,14 +280,19 @@ void decode(FILE *fp) {
 
 		} else {
 			prefix_pair_t prefix = read_prefix(&in);
+			uint16_t index = window_available(window) - prefix.index;
+
+			if (prefix.end_marker) {
+				break;
+			}
 
 			for (unsigned i = 0; i < prefix.length; i++) {
-				putchar(window_index(window, i + prefix.index));
+				putchar(window_index(window, index + i));
 			}
 
 			unsigned adjust = 0;
 			for (unsigned i = 0; i < prefix.length; i++) {
-				uint8_t value = window_index(window, i + prefix.index - adjust);
+				uint8_t value = window_index(window, i + index - adjust);
 				adjust += window_append(window, value);
 			}
 		}
