@@ -80,7 +80,6 @@ uint8_t window_remove_front(lzs_window_t *window) {
 
 bool refill_input(lzs_window_t *input, FILE *fp) {
 	while (!feof(fp) && !window_full(input)) {
-		//printf("available: %u\n", window_available(input));
 		uint8_t c = fgetc(fp);
 		if (feof(fp))
 			break;
@@ -97,6 +96,7 @@ typedef struct prefix_pair {
 	bool found;
 } prefix_pair_t;
 
+// TODO: more efficient string matching
 prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
 	prefix_pair_t ret = (prefix_pair_t){
 		.index = 0,
@@ -129,25 +129,43 @@ prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
 	return ret;
 }
 
-// TODO: proper LZS length/distance encoding
 void write_prefix(prefix_pair_t *prefix, huff_stream_t *out) {
 	huff_stream_write(out, 0);
 
-	for (unsigned i = 0; i < 11; i++) {
-		huff_stream_write(out, !!(prefix->index & (1 << i)));
+	if (prefix->index < 128) {
+		huff_stream_write(out, 1);
+		huff_stream_write_bits(out, 7, prefix->index);
+
+	} else {
+		huff_stream_write(out, 0);
+		huff_stream_write_bits(out, 11, prefix->index);
 	}
 
-	for (unsigned i = 0; i < 11; i++) {
-		huff_stream_write(out, !!(prefix->length & (1 << i)));
+	//huff_stream_write_bits(out, 11, prefix->length);
+	if (prefix->length < 5) {
+		huff_stream_write_bits(out, 2, prefix->length - 2);
+
+	} else if (prefix->length < 8) {
+		huff_stream_write_bits(out, 2, 3);
+		huff_stream_write_bits(out, 2, prefix->length - 5);
+
+	} else {
+		// TODO: would it be more efficient to have a variable-length field
+		//       like the index?
+		unsigned foo = (prefix->length + 7) / 15;
+		unsigned bar = prefix->length - ((foo * 15) - 7);
+
+		for (unsigned i = 0; i < foo; i++) {
+			huff_stream_write_bits(out, 4, 0xf);
+		}
+
+		huff_stream_write_bits(out, 4, bar);
 	}
 }
 
 void write_literal(uint8_t literal, huff_stream_t *out) {
 	huff_stream_write(out, 1);
-
-	for (unsigned i = 0; i < 8; i++) {
-		huff_stream_write(out, !!(literal & (1 << i)));
-	}
+	huff_stream_write_bits(out, 8, literal);
 }
 
 // read functions assume you've already read the leading bit
@@ -158,18 +176,37 @@ prefix_pair_t read_prefix(huff_stream_t *in) {
 		.found = true,
 	};
 
-	for (unsigned i = 0; i < 11; i++) {
-		ret.index |= huff_stream_read(in) << i;
-	}
+	bool is_small_offset = huff_stream_read(in);
+	ret.index = huff_stream_read_bits(in, is_small_offset? 7 : 11);
 
-	for (unsigned i = 0; i < 11; i++) {
-		ret.length |= huff_stream_read(in) << i;
+	unsigned lenbits = huff_stream_read_bits(in, 2);
+
+	if (lenbits < 3) {
+		ret.length = 2 + lenbits;
+
+	} else {
+		lenbits = huff_stream_read_bits(in, 2);
+
+		if (lenbits < 3) {
+			ret.length = 5 + lenbits;
+
+		} else {
+			unsigned c = 1;
+
+			do {
+				lenbits = huff_stream_read_bits(in, 4);
+				c += lenbits == 0xf;
+			} while (lenbits == 0xf);
+
+			ret.length = ((c * 15) - 7) + lenbits;
+		}
 	}
 
 	return ret;
 }
 
 uint8_t read_literal(huff_stream_t *in) {
+	//return huff_stream_read_bits(in, 8)
 	uint8_t ret = 0;
 
 	for (unsigned i = 0; i < 8; i++) {
@@ -190,7 +227,7 @@ void encode(FILE *fp) {
 	while (refill_input(input, fp)) {
 		prefix_pair_t prefix = find_prefix(input, window);
 
-		if (prefix.found && prefix.length > 3) {
+		if (prefix.found && prefix.length > 2) {
 			write_prefix(&prefix, &out);
 
 			for (unsigned k = 0; k < prefix.length; k++) {
@@ -246,13 +283,10 @@ int main(int argc, char *argv[]) {
 
 	if (strcmp(argv[1], "-e") == 0) {
 		encode(stdin);
-	}
 
-	else if (strcmp(argv[1], "-d") == 0) {
+	} else if (strcmp(argv[1], "-d") == 0) {
 		decode(stdin);
-
 	}
-
 
 	return 0;
 }
