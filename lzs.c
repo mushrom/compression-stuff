@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 // compile-time option to toggle the very slow but low-memory encoder
-#define LZS_SLOW_ENCODER 1
+#define LZS_FAST_ENCODER 1
 
 // constants here for testing and maybe making really embedded variations
 // easier in the future
@@ -19,6 +19,27 @@ typedef struct lzs_window {
 	uint16_t start;
 	uint16_t end;
 } lzs_window_t;
+
+typedef struct encoder_state {
+	lzs_window_t *input;
+	lzs_window_t *window;
+
+	// offset into the file
+	size_t offset;
+
+#if LZS_FAST_ENCODER
+	// since we can effectively compress sequences as small as 2 bytes, we can
+	// use a directly indexed hashmap of all 2 byte prefixes for window lookups
+	//
+	// TODO: add collision detection
+	size_t hashmap[0xffff];
+#endif
+} encoder_t;
+
+
+static inline uint16_t encoder_hash(uint8_t a, uint8_t b) {
+	return ((uint16_t)b << 8) | a;
+}
 
 lzs_window_t *window_create(uint16_t size) {
 	uint16_t realsize = (size && size < MAX_WINDOW_SIZE)? size : MAX_WINDOW_SIZE;
@@ -58,6 +79,10 @@ static inline uint16_t window_index(lzs_window_t *window, uint16_t index) {
 
 static inline uint8_t window_peek(lzs_window_t *window) {
 	return window->window[window->start];
+}
+
+static inline uint8_t window_peek_last(lzs_window_t *window) {
+	return window->window[window->end - 1];
 }
 
 bool window_append(lzs_window_t *window, uint8_t value) {
@@ -115,9 +140,28 @@ prefix_pair_t make_end_marker(void) {
 	};
 }
 
-#if LZS_SLOW_ENCODER
+static inline uint16_t prefix_length(encoder_t *state, uint16_t index) {
+	uint16_t ret = 0;
+
+	for (uint16_t i = 0;
+		 i < window_available(state->input)
+		 && (i + index) < window_available(state->window);
+		 i++)
+	{
+		if (window_index(state->window, i + index) == window_index(state->input, i)) {
+			ret++;
+
+		} else {
+			break;
+		}
+	}
+
+	return ret;
+}
+
+#if !LZS_FAST_ENCODER
 // TODO: more efficient string matching
-prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
+prefix_pair_t find_prefix(encoder_t *state) {
 	prefix_pair_t ret = (prefix_pair_t){
 		.index = 0,
 		.length = 0,
@@ -125,22 +169,11 @@ prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
 		.end_marker = false,
 	};
 
-	for (uint16_t k = 0; k < window_available(window); k++) {
+	for (uint16_t k = 0; k < window_available(state->window); k++) {
 		uint16_t temp_len = 0;
 
-		for (uint16_t i = 0;
-		     i < window_available(input) && (i + k) < window_available(window);
-		     i++)
-		{
-			if (window_index(window, i + k) == window_index(input, i)) {
-				temp_len++;
-
-			} else {
-				break;
-			}
-		}
-
-		uint16_t distance = window_available(window) - k;
+		temp_len = prefix_length(state, k);
+		uint16_t distance = window_available(state->window) - k;
 
 		if (temp_len > ret.length) {
 			ret.found = true;
@@ -151,8 +184,38 @@ prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
 
 	return ret;
 }
-#else /* if not LZS_SLOW_ENCODER */
-// TODO: not slow
+#else /* if LZS_FAST_ENCODER */
+prefix_pair_t find_prefix(encoder_t *state) {
+	prefix_pair_t ret = (prefix_pair_t){
+		.index = 0,
+		.length = 0,
+		.found = false,
+		.end_marker = false,
+	};
+
+	if (window_available(state->input) <= 1) {
+		return ret;
+	}
+
+	uint8_t a = window_index(state->input, 0);
+	uint8_t b = window_index(state->input, 1);
+	uint16_t hash = encoder_hash(a, b);
+
+	if (!state->hashmap[hash]) {
+		return ret;
+	}
+
+	uint16_t distance = state->offset - state->hashmap[hash];
+	uint16_t index = window_available(state->window) - distance;
+	uint16_t length = prefix_length(state, index);
+
+	// TODO: rename `index` field to distance
+	ret.found = true;
+	ret.index = distance;
+	ret.length = length;
+
+	return ret;
+}
 #endif
 
 void write_prefix(prefix_pair_t *prefix, huff_stream_t *out) {
@@ -246,27 +309,57 @@ uint8_t read_literal(huff_stream_t *in) {
 	return ret;
 }
 
+static inline void encoder_shift(encoder_t *state) {
+#if LZS_FAST_ENCODER
+	uint8_t a = window_peek(state->window);
+	uint8_t x = window_peek_last(state->window);
+	uint8_t y = window_peek(state->input);
+	uint16_t new_hash = encoder_hash(x, y);
+#endif
+
+	bool wrap = window_append(state->window, window_remove_front(state->input));
+	state->offset += 1;
+
+#if LZS_FAST_ENCODER
+	if (wrap) {
+		uint8_t b = window_peek(state->window);
+		uint16_t hash = encoder_hash(a, b);
+
+		// TODO: collision detection
+		state->hashmap[hash] = 0;
+	}
+
+	// new_hash is only valid if there was something in the window to hash
+	if (window_available(state->window) > 1) {
+		state->hashmap[new_hash] = state->offset - 2;
+	}
+#endif
+}
+
 void encode(FILE *fp, unsigned window_size) {
 	huff_stream_t out;
 	memset(&out, 0, sizeof(huff_stream_t));
 	out.fp = stdout;
 
-	lzs_window_t *input = window_create(window_size);
-	lzs_window_t *window = window_create(window_size);
+	encoder_t state;
+	memset(&state, 0, sizeof(encoder_t));
 
-	while (refill_input(input, fp)) {
-		prefix_pair_t prefix = find_prefix(input, window);
+	state.input  = window_create(window_size);
+	state.window = window_create(window_size);
+
+	while (refill_input(state.input, fp)) {
+		prefix_pair_t prefix = find_prefix(&state);
 
 		if (prefix.found && prefix.length > 1) {
 			write_prefix(&prefix, &out);
 
 			for (unsigned k = 0; k < prefix.length; k++) {
-				window_append(window, window_remove_front(input));
+				encoder_shift(&state);
 			}
 
 		} else {
-			write_literal(window_peek(input), &out);
-			window_append(window, window_remove_front(input));
+			write_literal(window_peek(state.input), &out);
+			encoder_shift(&state);
 		}
 	}
 
