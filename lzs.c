@@ -3,6 +3,15 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
+
+// compile-time option to toggle the very slow but low-memory encoder
+#define LZS_SLOW_ENCODER 1
+
+// constants here for testing and maybe making really embedded variations
+// easier in the future
+#define MAX_WINDOW_BITS 11
+#define MAX_WINDOW_SIZE (1 << MAX_WINDOW_BITS)
 
 typedef struct lzs_window {
 	uint8_t *window;
@@ -12,7 +21,7 @@ typedef struct lzs_window {
 } lzs_window_t;
 
 lzs_window_t *window_create(uint16_t size) {
-	uint16_t realsize = size? size : 2048;
+	uint16_t realsize = (size && size < MAX_WINDOW_SIZE)? size : MAX_WINDOW_SIZE;
 	lzs_window_t *ret = calloc(1, sizeof(lzs_window_t));
 
 	ret->window = calloc(1, sizeof(uint8_t[realsize]));
@@ -106,6 +115,7 @@ prefix_pair_t make_end_marker(void) {
 	};
 }
 
+#if LZS_SLOW_ENCODER
 // TODO: more efficient string matching
 prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
 	prefix_pair_t ret = (prefix_pair_t){
@@ -141,6 +151,9 @@ prefix_pair_t find_prefix(lzs_window_t *input, lzs_window_t *window) {
 
 	return ret;
 }
+#else /* if not LZS_SLOW_ENCODER */
+// TODO: not slow
+#endif
 
 void write_prefix(prefix_pair_t *prefix, huff_stream_t *out) {
 	huff_stream_write(out, 1);
@@ -151,7 +164,7 @@ void write_prefix(prefix_pair_t *prefix, huff_stream_t *out) {
 
 	} else {
 		huff_stream_write(out, 0);
-		huff_stream_write_bits(out, 11, prefix->index);
+		huff_stream_write_bits(out, MAX_WINDOW_BITS, prefix->index);
 	}
 
 	//huff_stream_write_bits(out, 11, prefix->length);
@@ -193,7 +206,7 @@ prefix_pair_t read_prefix(huff_stream_t *in) {
 	};
 
 	bool is_small_offset = huff_stream_read(in);
-	ret.index = huff_stream_read_bits(in, is_small_offset? 7 : 11);
+	ret.index = huff_stream_read_bits(in, is_small_offset? 7 : MAX_WINDOW_BITS);
 	ret.end_marker = ret.index == 0;
 
 	unsigned lenbits = huff_stream_read_bits(in, 2);
@@ -233,13 +246,13 @@ uint8_t read_literal(huff_stream_t *in) {
 	return ret;
 }
 
-void encode(FILE *fp) {
+void encode(FILE *fp, unsigned window_size) {
 	huff_stream_t out;
 	memset(&out, 0, sizeof(huff_stream_t));
 	out.fp = stdout;
 
-	lzs_window_t *input = window_create(0);
-	lzs_window_t *window = window_create(0);
+	lzs_window_t *input = window_create(window_size);
+	lzs_window_t *window = window_create(window_size);
 
 	while (refill_input(input, fp)) {
 		prefix_pair_t prefix = find_prefix(input, window);
@@ -299,16 +312,55 @@ void decode(FILE *fp) {
 	}
 }
 
+static unsigned translate_compression_level(int level) {
+	// compression level from 1-9, same as zip
+	return 1 << (2 + level);
+}
+
+void print_help(void) {
+	puts("Usage: lzs [-edh] [-c level]\n"
+	     "\t-h: print this help\n"
+	     "\t-e: encode input from stdin, the default if no options are given\n"
+	     "\t-d: decode input from stdin\n"
+	     "\t-c: specify compression level for the encoder, ranging from 1-9\n"
+	     "\t    with 1 being the lowest and 9 being the highest.");
+}
+
 int main(int argc, char *argv[]) {
-	if (argc < 2) {
-		puts("?");
-		return 0;
+	unsigned window_size = 0;
+	bool do_encode = true;
+
+	for (int opt; (opt = getopt(argc, argv, "edhc:")) != -1;) {
+		switch (opt) {
+			case 'e':
+				do_encode = true;
+				break;
+
+			case 'd':
+				do_encode = false;
+				break;
+
+			case 'c':
+				window_size = translate_compression_level(atoi(optarg));
+				break;
+
+			case 'h':
+				print_help();
+				exit(0);
+				break;
+
+			default:
+				print_help();
+				exit(EXIT_FAILURE);
+				break;
+		}
 	}
 
-	if (strcmp(argv[1], "-e") == 0) {
-		encode(stdin);
+	// TODO: filename
 
-	} else if (strcmp(argv[1], "-d") == 0) {
+	if (do_encode) {
+		encode(stdin, window_size);
+	} else {
 		decode(stdin);
 	}
 
