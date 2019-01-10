@@ -4,9 +4,9 @@ all: huffman rle lzs
 
 gentable: gentable.o
 
-huffman: huffman.o gentable.o
+huffman: huffman.o gentable.o queue.o
 
-lzs: lzs.o
+lzs: lzs.o queue.o
 
 rle: rle.o
 
