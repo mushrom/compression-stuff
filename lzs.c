@@ -1,4 +1,5 @@
 #include <hz/bitstream.h>
+#include <hz/queue.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -7,6 +8,12 @@
 
 // compile-time option to toggle the very slow but low-memory encoder
 #define LZS_FAST_ENCODER 1
+
+// number of matches to look for in the hashmap collision queue, when
+// LZS_FAST_ENCODER is enabled.
+//
+// TODO: maybe add an option to scale this with an option
+#define LZS_MAX_PREFIX_SEARCH 30
 
 // constants here for testing and maybe making really embedded variations
 // easier in the future
@@ -31,11 +38,23 @@ typedef struct encoder_state {
 	// since we can effectively compress sequences as small as 2 bytes, we can
 	// use a directly indexed hashmap of all 2 byte prefixes for window lookups
 	//
-	// TODO: add collision detection
-	size_t hashmap[0xffff];
+	// TODO: having a huge array here might have been a bad idea, seems to take
+	//       a pretty decent amount of time to initialize ~1MB of memory.
+	//       might be better to implement a proper hashmap, or a search tree.
+	// TODO: also look into having a fixed array of available queue nodes,
+	//       so that way we can avoid going through malloc()/free(), since
+	//       there will never be more than MAX_WINDOW_SIZE entries in the
+	//       hashmap.
+	queue_t hashmap[0x10000];
 #endif
 } encoder_t;
 
+typedef struct prefix_pair {
+	uint16_t index;
+	uint16_t length;
+	bool found;
+	bool end_marker;
+} prefix_pair_t;
 
 static inline uint16_t encoder_hash(uint8_t a, uint8_t b) {
 	return ((uint16_t)b << 8) | a;
@@ -124,13 +143,6 @@ bool refill_input(lzs_window_t *input, FILE *fp) {
 	return !window_empty(input);
 }
 
-typedef struct prefix_pair {
-	uint16_t index;
-	uint16_t length;
-	bool found;
-	bool end_marker;
-} prefix_pair_t;
-
 prefix_pair_t make_end_marker(void) {
 	return (prefix_pair_t) {
 		.index = 0,
@@ -148,7 +160,9 @@ static inline uint16_t prefix_length(encoder_t *state, uint16_t index) {
 		 && (i + index) < window_available(state->window);
 		 i++)
 	{
-		if (window_index(state->window, i + index) == window_index(state->input, i)) {
+		if (window_index(state->window, i + index)
+		    == window_index(state->input, i))
+		{
 			ret++;
 
 		} else {
@@ -160,7 +174,8 @@ static inline uint16_t prefix_length(encoder_t *state, uint16_t index) {
 }
 
 #if !LZS_FAST_ENCODER
-// TODO: more efficient string matching
+// TODO: huh, this seems to compress less effectively than the fast encoder,
+//       why's that?
 prefix_pair_t find_prefix(encoder_t *state) {
 	prefix_pair_t ret = (prefix_pair_t){
 		.index = 0,
@@ -201,18 +216,27 @@ prefix_pair_t find_prefix(encoder_t *state) {
 	uint8_t b = window_index(state->input, 1);
 	uint16_t hash = encoder_hash(a, b);
 
-	if (!state->hashmap[hash]) {
-		return ret;
+	size_t max_length = 0;
+	unsigned visited = 0;
+	for (queue_node_t *temp = state->hashmap[hash].front;
+	     temp && visited < LZS_MAX_PREFIX_SEARCH;
+	     temp = temp->next, visited++)
+	{
+		uintptr_t offset = temp->value;
+
+		uint16_t distance = state->offset - offset;
+		uint16_t index = window_available(state->window) - distance;
+		uint16_t length = prefix_length(state, index);
+
+		if (length > max_length) {
+			max_length = length;
+
+			// TODO: rename `index` field to distance
+			ret.found = true;
+			ret.index = distance;
+			ret.length = length;
+		}
 	}
-
-	uint16_t distance = state->offset - state->hashmap[hash];
-	uint16_t index = window_available(state->window) - distance;
-	uint16_t length = prefix_length(state, index);
-
-	// TODO: rename `index` field to distance
-	ret.found = true;
-	ret.index = distance;
-	ret.length = length;
 
 	return ret;
 }
@@ -325,13 +349,13 @@ static inline void encoder_shift(encoder_t *state) {
 		uint8_t b = window_peek(state->window);
 		uint16_t hash = encoder_hash(a, b);
 
-		// TODO: collision detection
-		state->hashmap[hash] = 0;
+		queue_pop_back(&state->hashmap[hash]);
 	}
 
 	// new_hash is only valid if there was something in the window to hash
 	if (window_available(state->window) > 1) {
-		state->hashmap[new_hash] = state->offset - 2;
+		// TODO: add `value` functions so we don't have to cast to a pointer
+		queue_push_front(&state->hashmap[new_hash], (void*)(state->offset - 2));
 	}
 #endif
 }
