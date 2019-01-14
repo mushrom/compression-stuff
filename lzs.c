@@ -362,8 +362,7 @@ static inline void encoder_shift(encoder_t *state) {
 
 void encode(FILE *fp, unsigned window_size) {
 	huff_stream_t out;
-	memset(&out, 0, sizeof(huff_stream_t));
-	out.fp = stdout;
+	huff_stream_init_write(&out, stdout);
 
 	encoder_t state;
 	memset(&state, 0, sizeof(encoder_t));
@@ -390,7 +389,6 @@ void encode(FILE *fp, unsigned window_size) {
 	prefix_pair_t end = make_end_marker();
 	write_prefix(&end, &out);
 	huff_stream_flush(&out);
-	fclose(out.fp);
 }
 
 void decode(FILE *fp) {
@@ -400,7 +398,7 @@ void decode(FILE *fp) {
 
 	lzs_window_t *window = window_create(0);
 
-	while (!feof(in.fp)) {
+	while (!huff_stream_end(&in)) {
 		bool is_literal = !huff_stream_read(&in);
 
 		if (is_literal) {

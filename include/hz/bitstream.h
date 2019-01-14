@@ -6,21 +6,54 @@
 #define BITS(X) (sizeof(X) * 8)
 
 typedef struct huff_stream {
+	// TODO: implement memory streams
+	// TODO: have flag for write/read mode
 	FILE *fp;
-	uint8_t buffer;
-	unsigned index;
+	size_t available;
+	size_t offset;
+	uint8_t fbuffer[0x1000];
 } huff_stream_t;
 
-static inline bool huff_stream_write(huff_stream_t *stream, bool bit) {
-	stream->buffer |= bit << stream->index++;
+static inline size_t bytepos(size_t offset) {
+	return offset >> 3;
+}
 
-	if (stream->index == BITS(stream->buffer)) {
-		fwrite(&stream->buffer, 1, sizeof(stream->buffer), stream->fp);
-		stream->index  = 0;
-		stream->buffer = 0;
+static inline size_t bitpos(size_t offset) {
+	return offset & 7;
+}
+
+static inline void bitset(uint8_t *buffer, size_t offset, bool bit) {
+	uint8_t foo = buffer[bytepos(offset)];
+
+	foo &= ~(1 << bitpos(offset));
+	foo |= bit << bitpos(offset);
+
+	buffer[bytepos(offset)] = foo;
+}
+
+static inline bool bitget(uint8_t *buffer, size_t offset) {
+	return !!(buffer[bytepos(offset)] & (1 << bitpos(offset)));
+}
+
+static inline void huff_stream_init_write(huff_stream_t *stream, FILE *fp) {
+	stream->available = BITS(stream->fbuffer);
+	stream->offset = 0;
+	stream->fp = fp;
+}
+
+static inline void huff_stream_do_write(huff_stream_t *stream) {
+	if (stream->offset > 0) {
+		fwrite(stream->fbuffer, 1, bytepos(stream->offset), stream->fp);
+		stream->offset = 0;
 	}
+}
 
-	return true;
+static inline void huff_stream_write(huff_stream_t *stream, bool bit) {
+	bitset(stream->fbuffer, stream->offset++, bit);
+
+	if (stream->offset == stream->available) {
+		huff_stream_do_write(stream);
+	}
 }
 
 static inline
@@ -30,13 +63,22 @@ void huff_stream_write_bits(huff_stream_t *stream, unsigned bits, uint32_t x) {
 	}
 }
 
+static inline bool huff_stream_end(huff_stream_t *stream) {
+	return (stream->offset == stream->available) && feof(stream->fp);
+}
+
 static inline bool huff_stream_read(huff_stream_t *stream) {
-	if (stream->index == 0) {
-		fread(&stream->buffer, 1, sizeof(stream->buffer), stream->fp);
-		stream->index = BITS(stream->buffer);
+	if (stream->offset == stream->available) {
+		stream->available = 8 * fread(&stream->fbuffer, 1, sizeof(stream->fbuffer),
+		                              stream->fp);
+		stream->offset = 0;
 	}
 
-	return !!(stream->buffer & (1 << (BITS(stream->buffer) - stream->index--)));
+	if (stream->offset < stream->available) {
+		return bitget(stream->fbuffer, stream->offset++);
+	} else {
+		return 0;
+	}
 }
 
 static inline
@@ -51,11 +93,6 @@ uint32_t huff_stream_read_bits(huff_stream_t *stream, unsigned bits) {
 }
 
 static inline void huff_stream_flush(huff_stream_t *stream) {
-	if (stream->index > 0) {
-		fwrite(&stream->buffer, 1, sizeof(stream->buffer), stream->fp);
-		stream->index = 0;
-		stream->buffer = 0;
-	}
-
+	huff_stream_do_write(stream);
 	fflush(stream->fp);
 }
