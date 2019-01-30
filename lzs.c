@@ -242,25 +242,25 @@ prefix_pair_t find_prefix(encoder_t *state) {
 }
 #endif
 
-void write_prefix(prefix_pair_t *prefix, huff_stream_t *out) {
-	huff_stream_write(out, 1);
+void write_prefix(prefix_pair_t *prefix, bit_stream_t *out) {
+	bit_stream_write(out, 1);
 
 	if (prefix->index < 128) {
-		huff_stream_write(out, 1);
-		huff_stream_write_bits(out, 7, prefix->index);
+		bit_stream_write(out, 1);
+		bit_stream_write_bits(out, 7, prefix->index);
 
 	} else {
-		huff_stream_write(out, 0);
-		huff_stream_write_bits(out, MAX_WINDOW_BITS, prefix->index);
+		bit_stream_write(out, 0);
+		bit_stream_write_bits(out, MAX_WINDOW_BITS, prefix->index);
 	}
 
-	//huff_stream_write_bits(out, 11, prefix->length);
+	//bit_stream_write_bits(out, 11, prefix->length);
 	if (prefix->length < 5) {
-		huff_stream_write_bits(out, 2, prefix->length - 2);
+		bit_stream_write_bits(out, 2, prefix->length - 2);
 
 	} else if (prefix->length < 8) {
-		huff_stream_write_bits(out, 2, 3);
-		huff_stream_write_bits(out, 2, prefix->length - 5);
+		bit_stream_write_bits(out, 2, 3);
+		bit_stream_write_bits(out, 2, prefix->length - 5);
 
 	} else {
 		// TODO: would it be more efficient to have a variable-length field
@@ -271,20 +271,20 @@ void write_prefix(prefix_pair_t *prefix, huff_stream_t *out) {
 		unsigned bar = prefix->length - ((foo * 15) - 7);
 
 		for (unsigned i = 0; i < foo; i++) {
-			huff_stream_write_bits(out, 4, 0xf);
+			bit_stream_write_bits(out, 4, 0xf);
 		}
 
-		huff_stream_write_bits(out, 4, bar);
+		bit_stream_write_bits(out, 4, bar);
 	}
 }
 
-void write_literal(uint8_t literal, huff_stream_t *out) {
-	huff_stream_write(out, 0);
-	huff_stream_write_bits(out, 8, literal);
+void write_literal(uint8_t literal, bit_stream_t *out) {
+	bit_stream_write(out, 0);
+	bit_stream_write_bits(out, 8, literal);
 }
 
 // read functions assume you've already read the leading bit
-prefix_pair_t read_prefix(huff_stream_t *in) {
+prefix_pair_t read_prefix(bit_stream_t *in) {
 	prefix_pair_t ret = (prefix_pair_t){
 		.length = 0,
 		.index = 0,
@@ -292,17 +292,17 @@ prefix_pair_t read_prefix(huff_stream_t *in) {
 		.end_marker = false,
 	};
 
-	bool is_small_offset = huff_stream_read(in);
-	ret.index = huff_stream_read_bits(in, is_small_offset? 7 : MAX_WINDOW_BITS);
+	bool is_small_offset = bit_stream_read(in);
+	ret.index = bit_stream_read_bits(in, is_small_offset? 7 : MAX_WINDOW_BITS);
 	ret.end_marker = ret.index == 0;
 
-	unsigned lenbits = huff_stream_read_bits(in, 2);
+	unsigned lenbits = bit_stream_read_bits(in, 2);
 
 	if (lenbits < 3) {
 		ret.length = 2 + lenbits;
 
 	} else {
-		lenbits = huff_stream_read_bits(in, 2);
+		lenbits = bit_stream_read_bits(in, 2);
 
 		if (lenbits < 3) {
 			ret.length = 5 + lenbits;
@@ -311,7 +311,7 @@ prefix_pair_t read_prefix(huff_stream_t *in) {
 			unsigned c = 1;
 
 			do {
-				lenbits = huff_stream_read_bits(in, 4);
+				lenbits = bit_stream_read_bits(in, 4);
 				c += lenbits == 0xf;
 			} while (lenbits == 0xf);
 
@@ -322,12 +322,12 @@ prefix_pair_t read_prefix(huff_stream_t *in) {
 	return ret;
 }
 
-uint8_t read_literal(huff_stream_t *in) {
-	//return huff_stream_read_bits(in, 8)
+uint8_t read_literal(bit_stream_t *in) {
+	//return bit_stream_read_bits(in, 8)
 	uint8_t ret = 0;
 
 	for (unsigned i = 0; i < 8; i++) {
-		ret |= huff_stream_read(in) << i;
+		ret |= bit_stream_read(in) << i;
 	}
 
 	return ret;
@@ -361,8 +361,8 @@ static inline void encoder_shift(encoder_t *state) {
 }
 
 void encode(FILE *fp, unsigned window_size) {
-	huff_stream_t out;
-	huff_stream_init_write(&out, stdout);
+	bit_stream_t out;
+	bit_stream_init_write(&out, stdout);
 
 	encoder_t state;
 	memset(&state, 0, sizeof(encoder_t));
@@ -388,18 +388,18 @@ void encode(FILE *fp, unsigned window_size) {
 
 	prefix_pair_t end = make_end_marker();
 	write_prefix(&end, &out);
-	huff_stream_flush(&out);
+	bit_stream_flush(&out);
 }
 
 void decode(FILE *fp) {
-	huff_stream_t in;
-	memset(&in, 0, sizeof(huff_stream_t));
+	bit_stream_t in;
+	memset(&in, 0, sizeof(bit_stream_t));
 	in.fp = fp;
 
 	lzs_window_t *window = window_create(0);
 
-	while (!huff_stream_end(&in)) {
-		bool is_literal = !huff_stream_read(&in);
+	while (!bit_stream_end(&in)) {
+		bool is_literal = !bit_stream_read(&in);
 
 		if (is_literal) {
 			uint8_t value = read_literal(&in);

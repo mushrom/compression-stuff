@@ -140,7 +140,7 @@ bool is_leaf(huff_node_t *node) {
 }
 
 bool huff_do_encode(huff_node_t *node,
-                    huff_stream_t *stream,
+                    bit_stream_t *stream,
                     uint16_t symbol,
                     uint32_t path,
                     uint32_t pathbits)
@@ -152,7 +152,7 @@ bool huff_do_encode(huff_node_t *node,
 	if (is_leaf(node) && symbol == node->symbol) {
 		for (unsigned k = pathbits; k;) {
 			bool bit = !!(path & (1 << --k));
-			huff_stream_write(stream, bit);
+			bit_stream_write(stream, bit);
 		}
 
 		return true;
@@ -166,13 +166,13 @@ bool huff_do_encode(huff_node_t *node,
 	return left || right;
 }
 
-bool huff_do_decode(huff_node_t *node, huff_stream_t *stream) {
+bool huff_do_decode(huff_node_t *node, bit_stream_t *stream) {
 	if (!node) {
 		return true;
 	}
 
 	for (bool found = false; !found;) {
-		bool dir = huff_stream_read(stream);
+		bool dir = bit_stream_read(stream);
 
 		node = dir? node->right : node->left;
 
@@ -189,9 +189,12 @@ bool huff_do_decode(huff_node_t *node, huff_stream_t *stream) {
 }
 
 void huff_encode(huff_tree_t *tree, FILE *fp) {
-	huff_stream_t stream;
+	bit_stream_t stream;
+	bit_stream_init_write(&stream, stdout);
+	/*
 	memset(&stream, 0, sizeof(stream));
 	stream.fp = stdout;
+	*/
 
 	while (!feof(fp)) {
 		uint16_t sym = fgetc(fp) & 0xff;
@@ -210,7 +213,7 @@ void huff_encode(huff_tree_t *tree, FILE *fp) {
 }
 
 void huff_decode(huff_tree_t *tree, FILE *fp) {
-	huff_stream_t stream;
+	bit_stream_t stream;
 	memset(&stream, 0, sizeof(stream));
 	stream.fp = stdin;
 	bool block_end = false;
